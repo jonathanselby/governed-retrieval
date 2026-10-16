@@ -1,0 +1,26 @@
+GOVERNED RETRIEVAL V0.1
+
+CALLER + QUERY                 CORPUS MANIFEST
+      |                              |
+      +--------------+---------------+
+                     v
+            +----------------+
+            | access filter  |  <- incident + compartment
+            +-------+--------+
+                    |
+                    | authorised documents only
+                    v
+            +----------------+
+            | MD/DOCX loader |
+            +-------+--------+
+                    v
+            +----------------+
+            | keyword ranker |
+            +-------+--------+
+                    |
+          +---------+----------+
+          |                    |
+          v                    v
+  CITED PASSAGES         GOVERNED REFUSAL
+
+Rule: Filter before ranking. Cite what supports the answer. Refuse when the corpus does not.
