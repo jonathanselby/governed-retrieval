@@ -6,7 +6,7 @@
 
 **Filter before ranking. Cite what supports the answer. Refuse when the corpus does not.**
 
-`governed-retrieval` is a deliberately small Go command-line component for retrieving only material a caller is allowed to see, returning source citations and refusing unsupported queries. It is independently usable outside the Cyber Response Action Board (CRAB).
+`governed-retrieval` is a deliberately small Go command-line component for retrieving only material a caller is allowed to see, returning source citations and refusing unsupported queries.
 
 ## Why it exists
 
