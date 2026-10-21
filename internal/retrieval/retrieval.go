@@ -13,6 +13,8 @@ import (
 	"unicode"
 )
 
+const MaxDocumentBytes int64 = 8 << 20
+
 type Document struct {
 	Path        string `json:"path"`
 	Incident    string `json:"incident,omitempty"`
@@ -138,22 +140,51 @@ func overlap(a, b map[string]struct{}) int {
 }
 
 func loadDocument(base, path string) ([]passage, error) {
-	clean := filepath.Clean(path)
-	if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") {
-		return nil, errors.New("document path must stay under corpus directory")
+	full, display, err := containedDocumentPath(base, path)
+	if err != nil {
+		return nil, err
 	}
-	full := filepath.Join(base, clean)
-	switch strings.ToLower(filepath.Ext(clean)) {
+	switch strings.ToLower(filepath.Ext(display)) {
 	case ".md", ".markdown":
-		return loadMarkdown(full, clean)
+		return loadMarkdown(full, display)
 	case ".docx":
-		return loadDOCX(full, clean)
+		return loadDOCX(full, display)
 	default:
-		return nil, fmt.Errorf("unsupported format %q", filepath.Ext(clean))
+		return nil, fmt.Errorf("unsupported format %q", filepath.Ext(display))
 	}
 }
+
+func containedDocumentPath(base, name string) (string, string, error) {
+	clean := filepath.Clean(name)
+	if strings.TrimSpace(name) == "" || clean == "." || filepath.IsAbs(clean) {
+		return "", "", errors.New("document path must stay under corpus directory")
+	}
+	baseAbs, err := filepath.Abs(base)
+	if err != nil {
+		return "", "", err
+	}
+	baseResolved, err := filepath.EvalSymlinks(baseAbs)
+	if err != nil {
+		return "", "", err
+	}
+	candidate := filepath.Join(baseAbs, clean)
+	rel, err := filepath.Rel(baseAbs, candidate)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", "", errors.New("document path must stay under corpus directory")
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", "", err
+	}
+	relResolved, err := filepath.Rel(baseResolved, resolved)
+	if err != nil || relResolved == ".." || strings.HasPrefix(relResolved, ".."+string(filepath.Separator)) || filepath.IsAbs(relResolved) {
+		return "", "", errors.New("document path resolves outside corpus directory")
+	}
+	return resolved, filepath.ToSlash(rel), nil
+}
+
 func loadMarkdown(full, display string) ([]passage, error) {
-	b, err := os.ReadFile(full)
+	b, err := readBoundedFile(full, MaxDocumentBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +215,38 @@ func loadMarkdown(full, display string) ([]passage, error) {
 	flush(len(lines))
 	return out, nil
 }
+
+func readBoundedFile(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if st.Size() > limit {
+		return nil, fmt.Errorf("document exceeds %d bytes", limit)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("document exceeds %d bytes", limit)
+	}
+	return b, nil
+}
+
 func loadDOCX(full, display string) ([]passage, error) {
+	st, err := os.Stat(full)
+	if err != nil {
+		return nil, err
+	}
+	if st.Size() > MaxDocumentBytes {
+		return nil, fmt.Errorf("DOCX archive exceeds %d bytes", MaxDocumentBytes)
+	}
 	z, err := zip.OpenReader(full)
 	if err != nil {
 		return nil, err
@@ -200,13 +262,17 @@ func loadDOCX(full, display string) ([]passage, error) {
 	if f == nil {
 		return nil, errors.New("DOCX missing word/document.xml")
 	}
+	if f.UncompressedSize64 > uint64(MaxDocumentBytes) {
+		return nil, fmt.Errorf("DOCX document.xml exceeds %d bytes expanded", MaxDocumentBytes)
+	}
 	rc, err := f.Open()
 	if err != nil {
 		return nil, err
 	}
 	defer rc.Close()
-	return parseDOCX(rc, display)
+	return parseDOCX(io.LimitReader(rc, MaxDocumentBytes+1), display)
 }
+
 func parseDOCX(r io.Reader, display string) ([]passage, error) {
 	dec := xml.NewDecoder(r)
 	var out []passage
@@ -223,11 +289,19 @@ func parseDOCX(r io.Reader, display string) ([]passage, error) {
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			if t.Name.Local == "t" {
+			switch t.Name.Local {
+			case "t":
 				inText = true
+			case "tab", "br", "cr":
+				if para.Len() > 0 {
+					para.WriteByte(' ')
+				}
 			}
 		case xml.CharData:
 			if inText {
+				if para.Len() > 0 && !strings.HasSuffix(para.String(), " ") {
+					para.WriteByte(' ')
+				}
 				para.Write([]byte(t))
 			}
 		case xml.EndElement:
@@ -235,7 +309,7 @@ func parseDOCX(r io.Reader, display string) ([]passage, error) {
 				inText = false
 			}
 			if t.Name.Local == "p" {
-				text := strings.TrimSpace(para.String())
+				text := strings.Join(strings.Fields(para.String()), " ")
 				para.Reset()
 				if text != "" {
 					n++

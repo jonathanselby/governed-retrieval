@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -42,14 +43,14 @@ func TestDOCX(t *testing.T) {
 	f, _ := os.Create(p)
 	zw := zip.NewWriter(f)
 	x, _ := zw.Create("word/document.xml")
-	x.Write([]byte(`<w:document xmlns:w="x"><w:body><w:p><w:r><w:t>Call the insurer hotline first.</w:t></w:r></w:p></w:body></w:document>`))
+	x.Write([]byte(`<w:document xmlns:w="x"><w:body><w:p><w:r><w:t>Call</w:t><w:tab/><w:t>the insurer</w:t><w:br/><w:t>hotline first.</w:t></w:r></w:p></w:body></w:document>`))
 	zw.Close()
 	f.Close()
 	got, err := Retrieve(d, Manifest{Documents: []Document{{Path: "runbook.docx"}}}, Caller{ID: "sam"}, "insurer hotline", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Refused || got.Citations[0].Locator != "paragraph:1" {
+	if got.Refused || got.Citations[0].Locator != "paragraph:1" || !strings.Contains(got.Citations[0].Passage, "Call the insurer hotline first") {
 		t.Fatalf("bad result %+v", got)
 	}
 }
@@ -59,7 +60,57 @@ func TestPathEscapeRejected(t *testing.T) {
 		t.Fatal("expected path error")
 	}
 }
-
+func TestSymlinkEscapeRejected(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.md"), []byte("secret material"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.md"), filepath.Join(base, "link.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	_, err := Retrieve(base, Manifest{Documents: []Document{{Path: "link.md"}}}, Caller{ID: "a"}, "secret", 3)
+	if err == nil {
+		t.Fatal("symlink escape accepted")
+	}
+}
+func TestOversizedDOCXRejected(t *testing.T) {
+	d := t.TempDir()
+	p := filepath.Join(d, "large.docx")
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	x, err := zw.Create("word/document.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x.Write([]byte(`<w:document xmlns:w="x"><w:body><w:p><w:r><w:t>` + strings.Repeat("x", int(MaxDocumentBytes)+1) + `</w:t></w:r></w:p></w:body></w:document>`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Retrieve(d, Manifest{Documents: []Document{{Path: "large.docx"}}}, Caller{ID: "a"}, "xxxxx", 3)
+	if err == nil {
+		t.Fatal("oversized expanded DOCX accepted")
+	}
+}
+func TestOversizedMarkdownRejected(t *testing.T) {
+	d := t.TempDir()
+	p := filepath.Join(d, "large.md")
+	if err := os.WriteFile(p, []byte(strings.Repeat("x", int(MaxDocumentBytes)+1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Retrieve(d, Manifest{Documents: []Document{{Path: "large.md"}}}, Caller{ID: "a"}, "xxxxx", 3)
+	if err == nil {
+		t.Fatal("oversized Markdown accepted")
+	}
+}
 func TestUnsupportedQueryRefuses(t *testing.T) {
 	d := t.TempDir()
 	if err := os.WriteFile(filepath.Join(d, "runbook.md"), []byte("Call the insurer hotline first."), 0600); err != nil {
